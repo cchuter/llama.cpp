@@ -1,8 +1,7 @@
 #include "dsv4-fp8-kv-quantize.cuh"
-
-#if __CUDA_ARCH__ >= 890
-#include <cuda_fp8.h>
-#endif
+// The vendor layer (included via dsv4-fp8-kv-quantize.cuh -> common.cuh) provides
+// __nv_fp8_e4m3 on both CUDA (via <cuda_fp8.h>) and HIP (via <hip/hip_fp8.h>).
+// The FP8_AVAILABLE macro is always set on HIP; on CUDA it gates on sm_89+.
 
 #include <cstdint>
 
@@ -42,17 +41,15 @@ static __device__ __forceinline__ float dsv4_e4m3fn_dequant_sw(float x) {
 
 // Dual-path E4M3FN quantize+dequantize round-trip with saturation.
 //
-// Native path uses NVIDIA's documented FP8 class API. The constructor
-// __nv_fp8_e4m3(float) applies round-to-nearest-even and saturates to
-// the finite E4M3 range (+/-448). The explicit float() conversion expands
-// the FP8 storage back to F32. This is the supported public API per
-// NVIDIA's cuda_fp8.h headers (CUDA toolkit >= 11.8).
+// When FP8_AVAILABLE is set (CUDA sm_89+ or any HIP target that provides
+// <hip/hip_fp8.h>), the __nv_fp8_e4m3 class wrapper applies
+// round-to-nearest-even and saturates to the finite E4M3 range (+/-448).
+// Otherwise, software emulation mirrors the CPU reference.
 //
-// (We intentionally avoid the lower-level __nv_cvt_fp8_to_halfraw +
-// __half2float chain: the class wrapper is clearer and avoids a half
-// hop on F32-only data. There is no __nv_cvt_fp8_to_float intrinsic.)
+// On ROCm/HIP, FP8_AVAILABLE is always set at compile-time; runtime device
+// capability is checked elsewhere via ggml_backend_cuda_context.
 static __device__ __forceinline__ float dsv4_e4m3fn_roundtrip(float x) {
-#if __CUDA_ARCH__ >= 890
+#ifdef FP8_AVAILABLE
     const __nv_fp8_e4m3 q(x);
     return float(q);
 #else
@@ -65,7 +62,7 @@ static __device__ __forceinline__ float dsv4_e4m3fn_roundtrip(float x) {
 static __device__ __forceinline__ float warp_reduce_max(float v) {
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1) {
-        v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, offset));
+        v = fmaxf(v, __shfl_xor_sync(0xffffffffu, v, offset, WARP_SIZE));
     }
     return v;
 }

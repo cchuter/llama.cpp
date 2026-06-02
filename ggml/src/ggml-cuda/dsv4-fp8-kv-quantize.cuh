@@ -20,11 +20,11 @@
 //   Public API:           ggml/include/ggml.h:2591 (ggml_dsv4_fp8_kv_quantize)
 //
 // Dual-path implementation:
-//   - __CUDA_ARCH__ >= 890 (Ada/Hopper/Blackwell): native FP8 via the
-//     __nv_fp8_e4m3 class wrapper from <cuda_fp8.h> (round-to-nearest-even,
-//     saturate-to-finite to +/-448).
-//   - __CUDA_ARCH__ <  890 (Volta/Turing/Ampere): software emulation by
-//     nearest-even E4M3FN code search, mirroring the CPU reference.
+//   - FP8_AVAILABLE defined (CUDA sm_89+ / any HIP target with
+//     <hip/hip_fp8.h>): native FP8 via the __nv_fp8_e4m3 class wrapper
+//     (round-to-nearest-even, saturate-to-finite to +/-448).
+//   - Otherwise: software emulation by nearest-even E4M3FN code search,
+//     mirroring the CPU reference.
 //
 // Both paths produce numerically equivalent output (subject to FP8's
 // inherent lossiness). The four test_dsv4_fp8_kv_quantize cases from

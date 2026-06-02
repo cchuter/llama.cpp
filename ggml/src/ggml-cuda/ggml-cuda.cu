@@ -130,17 +130,21 @@ static cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device)
     ggml_cuda_set_device(device);
     cudaError_t err;
     if (getenv("GGML_CUDA_ENABLE_UNIFIED_MEMORY") != nullptr) {
+        // Prefer managed/UMA-backed allocation when requested. If it fails for any reason
+        // (OOM, registration failure, unsupported on this platform), fall back to a plain
+        // device allocation. This makes the runtime tolerant of systems where pinning
+        // host memory is restricted (small RLIMIT_MEMLOCK) or the driver refuses UMA.
         err = cudaMallocManaged(ptr, size);
+
 #if defined(GGML_USE_HIP)
+        // On HIP, a successful managed allocation may still benefit from an optional hint.
         if (err == hipSuccess) {
-            // hipMemAdviseSetCoarseGrain is an optional performance hint;
-            // ignore errors (e.g. hipErrorInvalidValue on some APU/iGPU configs).
             (void)cudaMemAdvise(*ptr, size, hipMemAdviseSetCoarseGrain, device);
             (void)hipGetLastError(); // clear any error
         }
 
-        // fall back to cudaMalloc if not supported (e.g. on Windows)
-        if (err == hipErrorNotSupported) {
+        // If managed allocation isn't supported, or it failed for any reason, try a device-only alloc.
+        if (err != cudaSuccess && err == hipErrorNotSupported) {
             static bool warned_unsupported = false;
             if (!warned_unsupported) {
                 GGML_LOG_WARN("hipMallocManaged unsupported, falling back to hipMalloc.\n");
@@ -150,6 +154,15 @@ static cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device)
             err = cudaMalloc(ptr, size);
         }
 #endif // defined(GGML_USE_HIP)
+
+        // General fallback: if managed allocation failed (OOM, registration denied, etc.)
+        // attempt a plain device allocation. This handles cases where cudaMallocManaged
+        // fails due to host-page registration limits even though device memory is available.
+        if (err != cudaSuccess) {
+            GGML_LOG_WARN("cudaMallocManaged failed (%s), falling back to cudaMalloc\n", cudaGetErrorString(err));
+            (void)cudaGetLastError();
+            err = cudaMalloc(ptr, size);
+        }
     } else {
         err = cudaMalloc(ptr, size);
     }
@@ -5059,12 +5072,23 @@ static void ggml_backend_cuda_device_get_memory(ggml_backend_dev_t dev, size_t *
     bool is_uma = prop.integrated > 0 || uma_env;
 
     if (is_uma) {
-        // For UMA systems (like DGX Spark), use system memory info
+        // For UMA systems (APUs like Strix Halo, DGX Spark), the GPU shares
+        // the full system memory pool including swap.  hipMemGetInfo already
+        // reflects the full pool size; we only correct `free` to account for
+        // host-side allocations and pageable memory that the GPU can still
+        // access (at a performance cost).
+        //
+        // Using MemAvailable alone undercounts badly on high-swap systems
+        // where llm weights are paged out.  Adding SwapFree gives the true
+        // addressable pool.
         long available_memory_kb = 0;
         long free_swap_kb = 0;
 
         if (ggml_backend_cuda_get_available_uma_memory(&available_memory_kb, &free_swap_kb) && available_memory_kb > 0) {
-            *free = (size_t)available_memory_kb * 1024;
+            const size_t free_new = (size_t)(available_memory_kb + free_swap_kb) * 1024;
+            GGML_LOG_DEBUG("%s: UMA free = %zu MiB (MemAvailable %ld MiB + SwapFree %ld MiB) vs hipMemGetInfo %zu MiB\n",
+                __func__, free_new / (1024*1024), available_memory_kb / 1024, free_swap_kb / 1024, *free / (1024*1024));
+            *free = free_new;
         } else {
             GGML_LOG_ERROR("%s: /proc/meminfo reading failed, using cudaMemGetInfo\n", __func__);
         }

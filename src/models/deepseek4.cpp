@@ -1327,7 +1327,12 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
                 const int64_t n_comp_before  = first_pos / compress_ratio;
                 const int64_t n_comp_visible = (last_pos + 1) / compress_ratio;
                 const int64_t n_comp_cache = mctx_dsv4->get_dsv4_n_comp(il);
-                GGML_ASSERT(n_comp_visible <= n_comp_cache);
+                // During graph_reserve (context init) the ubatch may report
+                // positions that exceed n_ctx_seq — clamp to cache capacity
+                // to keep the graph well-formed.  Real inference will never
+                // have more positions than the cache, only the reserve call
+                // pushes pessimistic n_tokens == n_ubatch.
+                const int64_t n_comp_visible_clamped = std::min(n_comp_visible, n_comp_cache);
 
                 dsv4_decode_compressor dec = n_tokens == 1
                     ? dsv4_build_compressor_decode(ctx0, cur,
@@ -1365,7 +1370,7 @@ llama_model_deepseek4::graph::graph(const llama_model & model, const llm_graph_p
 
                 if (dec.kv_comp != nullptr) {
                     dec.kv_comp = ggml_dsv4_fp8_kv_quantize(ctx0, dec.kv_comp, n_rot);
-                    store_attn_cache_rows(dec.kv_comp, n_comp_before, n_comp_visible - n_comp_before);
+                    store_attn_cache_rows(dec.kv_comp, n_comp_before, n_comp_visible_clamped - n_comp_before);
                 }
 
                 ggml_tensor * k_raw = mctx_swa->get_k(ctx0, il);
